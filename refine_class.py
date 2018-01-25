@@ -8,12 +8,9 @@ class RefineLayer:
 	# refine layer ---------------------------------------------------------------------------------
 	def refine(self, inputs):
 		in_sampling3D, in_sampling2D, in_objPts, in_imgPts, in_hyp, in_objIdx, in_shuffleIdx, in_cmat, in_distcoeffs = inputs
-		inlierMaps = np.zeros((in_hyp.shape[0], in_sampling3D.shape[0]))
+		self.inlierMaps = np.zeros((in_hyp.shape[0], in_sampling3D.shape[0]))
 		
-
 		def _refine(sampling3D, sampling2D, objPts, imgPts, hyps, objIdx, shuffleIdx, cmat, distcoeffs):
-			if self.start_numeric == False:
-				self.start_numeric = True
 			refHyps = np.zeros(hyps.shape, dtype=np.float64)	
 			samplingCopy = copy.deepcopy(sampling3D)
 			'''
@@ -44,7 +41,7 @@ class RefineLayer:
 					refHyps[h] = np.append(rot, tran)
 					diffmaps = getDiffMap(refHyps[h], samplingCopy, sampling2D, cmat, distcoeffs)
 				for idx in objIdx[h]:
-					inlierMaps[h][idx] = 0
+					self.inlierMaps[h][idx] = 0
 			print(inlierMaps)
 			return refHyps
 

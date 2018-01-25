@@ -202,20 +202,22 @@ std::vector<double> refine_single(
 // hyps:       (h, 6)
 // objIdx:     (h, 4)
 // shuffleIdx: (refinesteps, n)
+// inlier_map  (h, n)
 // camMat:     (3, 3)
 void c_refine(double * ref_hyps, 
 	double * sampling3D, 
 	double * sampling2D, 
 	double * objPts, 
 	double * imgPts, 
-	double * hyps, 
+	double * hyps,
+	int * inlier_map, 
 	int * objIdx, 
 	int * shuffleIdx, 
 	double * camMat,
 	int n,
 	int hyp_num, 
 	int init_num, 
-	int ref_steps, 
+	int ref_steps,
 	int inlier_count)
 {
 	std::vector<cv::Point3d> sampling3D_vec;
@@ -267,18 +269,71 @@ void c_refine(double * ref_hyps,
 	ref_hyps_vec.resize(hyp_num);
 
 	#pragma omp parallel for
-	for(int i = 0; i < hyp_num; i++)
+	for(int h = 0; h < hyp_num; h++)
 	{
-		std::vector<double> new_hyp;
-		new_hyp = refine_single(
-			inlier_count, 
-			ref_steps,
-			shuffleIdx_vec, 
-			sampling3D_vec, 
-			sampling2D_vec,
-			hyp_vec[i],
-			m_camMat);
-		ref_hyps_vec[i] = new_hyp;
+		std::vector<double> hyp = hyp_vec[h];
+		cv::Mat hyp_rot(3, 1, CV_64F);
+		cv::Mat hyp_trans(3, 1, CV_64F);
+		cv::Mat hypUpdate_rot(3, 1, CV_64F);
+		cv::Mat hypUpdate_trans(3, 1, CV_64F);
+		for(int i = 0; i < 3; i++)
+			hyp_rot.at<double>(i, 0) = hyp[i];
+		for(int i = 0; i < 3; i++)
+			hyp_trans.at<double>(i, 0) = hyp[i+3];
+
+		std::vector<double> new_hyp(hyp);
+		std::vector<float> diffMap = getDiffMap(hyp, sampling3D_vec, sampling2D_vec, m_camMat);
+
+		for(int rStep = 0; rStep < ref_steps; rStep++)
+		{
+			 // collect 2D-3D correspondences
+	        std::vector<cv::Point2d> localImgPts;
+	        std::vector<cv::Point3d> localObjPts;
+
+	        for(int i = 0; i < shuffleIdx_vec[rStep].size(); i++)
+	        {
+	        	int idx = shuffleIdx_vec[rStep][i];
+
+	        	// inlier check
+	        	if(diffMap[idx] < INLIERTHRESHOLD2D)
+	        	{
+	        		localObjPts.push_back(sampling3D_vec[idx]);
+	        		localImgPts.push_back(sampling2D_vec[idx]);
+	        		inlier_map[h*n+idx] += 1;
+	        	}
+
+	        	if(localImgPts.size() >= inlier_count)
+	        		break;
+	        }
+
+	        if(localImgPts.size() < 3)
+	        	continue;
+
+	        // recalculate pose
+
+	        hypUpdate_rot = hyp_rot.clone();
+	        hypUpdate_trans = hyp_trans.clone();
+
+	        if(!safeSolvePnP(localObjPts, localImgPts, m_camMat, cv::Mat(), hypUpdate_rot, hypUpdate_trans, false, (localImgPts.size() > 4) ? CV_ITERATIVE : CV_P3P))
+	        	break; // abort if PnP fails
+	        if(containsNaNs(hypUpdate_rot) || containsNaNs(hypUpdate_trans))
+	            break; // abort if PnP fails
+
+	        for(int i = 0; i < 3; i++)
+				new_hyp[i] = hypUpdate_rot.at<double>(i, 0);
+			for(int i = 0; i < 3; i++)
+				new_hyp[i+3] = hypUpdate_trans.at<double>(i, 0);
+
+	        diffMap = getDiffMap(new_hyp, sampling3D_vec, sampling2D_vec, m_camMat);
+		}
+
+		for(int i = 0; i < init_num; i++)
+		{
+			int idx = objIdx_vec[h][i];
+			inlier_map[h*n+idx] = 0;
+		}
+
+		ref_hyps_vec[h] = new_hyp;
 	}
 
 	for(int i = 0; i < hyp_num; i++)
@@ -343,13 +398,17 @@ void c_refine_single(double * ref_hyp,
 	return ;
 }
 
-// jacobean_obj (h, 4, 3)
-// grad         (h, 6)
-void c_dRefine(double * jacobean_obj, 
+// jacobean_obj    (h, 4, 3)
+// jacobean_sample (n, 3)
+// grad            (h, 6)
+// inlier_map      (h, n)
+void c_dRefine(double * jacobean_obj,
+	double * jacobean_sample, 
 	double * sampling3D, 
 	double * sampling2D, 
 	double * objPts, 
 	double * imgPts,
+	int * inlier_map,
 	int * objIdx, 
 	int * shuffleIdx, 
 	double * camMat,
@@ -359,7 +418,8 @@ void c_dRefine(double * jacobean_obj,
 	int init_num, 
 	int ref_steps, 
 	int inlier_count,
-	double eps)
+	double eps,
+	int skip)
 {
 	std::vector<cv::Point3d> sampling3D_vec;
 	std::vector<cv::Point2d> sampling2D_vec;
@@ -398,7 +458,6 @@ void c_dRefine(double * jacobean_obj,
 		imgPts_vec.push_back(img);
 	}
 
-	std::cout<<"finish"<<std::endl;
 
 	for(int i = 0; i < ref_steps; i++)
 	{
@@ -406,8 +465,9 @@ void c_dRefine(double * jacobean_obj,
 		shuffleIdx_vec.push_back(tmp_shuffle);
 	}
 
-	std::vector<std::vector<double> > ref_hyps_vec;
 
+	// derivative wrt initial 4 points
+	/*
 	#pragma omp parallel for
 	for(int h = 0; h < hyp_num; h++)
 	{
@@ -421,27 +481,21 @@ void c_dRefine(double * jacobean_obj,
 
 			cv::Mat hyp_rot(3, 1, CV_64F);
 			cv::Mat hyp_trans(3, 1, CV_64F);
+
 			switch(j)
 			{
-				case 0:	objPts_vec[h][i].x += eps;
-						sampling3D_vec[objIdx_vec[h][i]].x += eps;
-						break;
-				case 1: objPts_vec[h][i].y += eps;
-						sampling3D_vec[objIdx_vec[h][i]].y += eps;
-						break;
-				case 2: objPts_vec[h][i].z += eps;
-						sampling3D_vec[objIdx_vec[h][i]].z += eps;
-						break;
+				case 0:	objPts_vec[h][i].x += eps;sampling3D_vec[objIdx_vec[h][i]].x += eps;break;
+				case 1: objPts_vec[h][i].y += eps;sampling3D_vec[objIdx_vec[h][i]].y += eps;break;
+				case 2: objPts_vec[h][i].z += eps;sampling3D_vec[objIdx_vec[h][i]].z += eps;break;
 				default:break;
 			}
-                        //std::cout<<"start first pnp"<<std::endl;
+
 			if(!safeSolvePnP(objPts_vec[h], imgPts_vec[h], m_camMat, cv::Mat(), hyp_rot, hyp_trans, false, CV_ITERATIVE))
 				continue;
-			for(int k = 0; k < 3; k++)
-				hyp1[k] = hyp_rot.at<double>(k, 0);
-			for(int k = 0; k < 3; k++)
-				hyp1[k+3] = hyp_trans.at<double>(k, 0);
-                        //std::cout<<"finish first pnp"<<std::endl;
+
+			for(int k = 0; k < 3; k++) hyp1[k] = hyp_rot.at<double>(k, 0);
+			for(int k = 0; k < 3; k++) hyp1[k+3] = hyp_trans.at<double>(k, 0);
+
 			new_hyp1 = refine_single(
 				inlier_count, 
 				ref_steps,
@@ -450,26 +504,21 @@ void c_dRefine(double * jacobean_obj,
 				sampling2D_vec, 
 				hyp1,
 				m_camMat);
+
+
 			switch(j)
 			{
-				case 0:	objPts_vec[h][i].x -= 2 * eps;
-						sampling3D_vec[objIdx_vec[h][i]].x -= 2 * eps;
-						break;
-				case 1: objPts_vec[h][i].y -= 2 * eps;
-						sampling3D_vec[objIdx_vec[h][i]].y -= 2 * eps;
-						break;
-				case 2: objPts_vec[h][i].z -= 2 * eps;
-						sampling3D_vec[objIdx_vec[h][i]].z -= 2 * eps;
-						break;
+				case 0:	objPts_vec[h][i].x -= 2 * eps;sampling3D_vec[objIdx_vec[h][i]].x -= 2 * eps;break;
+				case 1: objPts_vec[h][i].y -= 2 * eps;sampling3D_vec[objIdx_vec[h][i]].y -= 2 * eps;break;
+				case 2: objPts_vec[h][i].z -= 2 * eps;sampling3D_vec[objIdx_vec[h][i]].z -= 2 * eps;break;
 				default:break;
 			}
 
 			if(!safeSolvePnP(objPts_vec[h], imgPts_vec[h], m_camMat, cv::Mat(), hyp_rot, hyp_trans, false, CV_ITERATIVE))
 				continue;
-			for(int k = 0; k < 3; k++)
-				hyp2[k] = hyp_rot.at<double>(k, 0);
-			for(int k = 0; k < 3; k++)
-				hyp2[k+3] = hyp_trans.at<double>(k, 0);
+
+			for(int k = 0; k < 3; k++) hyp2[k] = hyp_rot.at<double>(k, 0);
+			for(int k = 0; k < 3; k++) hyp2[k+3] = hyp_trans.at<double>(k, 0);
 
 			new_hyp2 = refine_single(
 				inlier_count, 
@@ -482,19 +531,11 @@ void c_dRefine(double * jacobean_obj,
 
 			switch(j)
 			{
-				case 0:	objPts_vec[h][i].x += eps;
-						sampling3D_vec[objIdx_vec[h][i]].x += eps;
-						break;
-				case 1: objPts_vec[h][i].y += eps;
-						sampling3D_vec[objIdx_vec[h][i]].y += eps;
-						break;
-				case 2: objPts_vec[h][i].z += eps;
-						sampling3D_vec[objIdx_vec[h][i]].z += eps;
-						break;
+				case 0:	objPts_vec[h][i].x += eps;sampling3D_vec[objIdx_vec[h][i]].x += eps;break;
+				case 1: objPts_vec[h][i].y += eps;sampling3D_vec[objIdx_vec[h][i]].y += eps;break;
+				case 2: objPts_vec[h][i].z += eps;sampling3D_vec[objIdx_vec[h][i]].z += eps;break;
 				default:break;
 			}
-
-
 
 			for(int k = 0; k < 6; k++)
 			{
@@ -502,6 +543,98 @@ void c_dRefine(double * jacobean_obj,
 			}
 		}
 	}
+
+	*/
+
+	// derivatice wrt other points
+	#pragma omp parallel for
+	for(int h = 0; h < hyp_num; h++)
+	{
+		int inCount = 0;
+		for(int i = 0; i < n; i++)
+		{
+			if(inlier_map[h*n+i] == 0)
+				continue;
+
+			inCount ++;
+			if(inCount % skip == 0)
+				continue;
+
+			for(int j = 0; j < 3; j++)
+			{
+
+				std::vector<double> new_hyp1(6);
+				std::vector<double> new_hyp2(6);
+				std::vector<double> hyp1(6);
+				std::vector<double> hyp2(6);
+
+				cv::Mat hyp_rot(3, 1, CV_64F);
+				cv::Mat hyp_trans(3, 1, CV_64F);
+
+				switch(j)
+				{
+					case 0:	sampling3D_vec[i].x += eps;break;
+					case 1: sampling3D_vec[i].y += eps;break;
+					case 2: sampling3D_vec[i].z += eps;break;
+					default:break;
+				}
+
+
+				if(!safeSolvePnP(objPts_vec[h], imgPts_vec[h], m_camMat, cv::Mat(), hyp_rot, hyp_trans, false, CV_ITERATIVE))
+					continue;
+
+				for(int k = 0; k < 3; k++) hyp1[k] = hyp_rot.at<double>(k, 0);
+				for(int k = 0; k < 3; k++) hyp1[k+3] = hyp_trans.at<double>(k, 0);
+
+				new_hyp1 = refine_single(
+					inlier_count, 
+					ref_steps,
+					shuffleIdx_vec, 
+					sampling3D_vec, 
+					sampling2D_vec, 
+					hyp1,
+					m_camMat);
+
+				switch(j)
+				{
+					case 0:	sampling3D_vec[i].x -= 2 * eps;break;
+					case 1: sampling3D_vec[i].y -= 2 * eps;break;
+					case 2: sampling3D_vec[i].z -= 2 * eps;break;
+					default:break;
+				}
+
+				if(!safeSolvePnP(objPts_vec[h], imgPts_vec[h], m_camMat, cv::Mat(), hyp_rot, hyp_trans, false, CV_ITERATIVE))
+					continue;
+
+				for(int k = 0; k < 3; k++) hyp2[k] = hyp_rot.at<double>(k, 0);
+				for(int k = 0; k < 3; k++) hyp2[k+3] = hyp_trans.at<double>(k, 0);
+
+				new_hyp2 = refine_single(
+					inlier_count, 
+					ref_steps,
+					shuffleIdx_vec, 
+					sampling3D_vec, 
+					sampling2D_vec, 
+					hyp2,
+					m_camMat);
+
+				switch(j)
+				{
+					case 0:	sampling3D_vec[i].x += eps;break;
+					case 1: sampling3D_vec[i].y += eps;break;
+					case 2: sampling3D_vec[i].z += eps;break;
+					default:break;
+				}
+
+				for(int k = 0; k < 6; k++)
+				{
+					jacobean_sample[i*3+j] += ((new_hyp1[k] - new_hyp2[k]) / (2 * eps) * grad[h*6+k]);
+				}
+
+			}
+		}
+	}
+	
 
 
 	return ;

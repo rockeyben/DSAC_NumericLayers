@@ -16,6 +16,7 @@ cdef extern from "c_NumericLayers.h":
 		double * objPts, 
 		double * imgPts, 
 		double * hyps, 
+		int * inlier_map,
 		int * objIdx, 
 		int * shuffleIdx, 
 		double * camMat,
@@ -36,11 +37,13 @@ cdef extern from "c_NumericLayers.h":
 		int ref_steps,
 		int inlier_count)
 
-	cdef extern void c_dRefine(double * jacobean_obj, 
+	cdef extern void c_dRefine(double * jacobean_obj,
+		double * jacobean_sample, 
 		double * sampling3D, 
 		double * sampling2D, 
 		double * objPts, 
 		double * imgPts,
+		int * inlier_map,
 		int * objIdx, 
 		int * shuffleIdx, 
 		double * camMat,
@@ -50,7 +53,8 @@ cdef extern from "c_NumericLayers.h":
 		int init_num, 
 		int ref_steps, 
 		int inlier_count,
-		double eps)
+		double eps,
+		int skip)
 
 def solvePnP(np.ndarray[double, ndim=3, mode="c"] input1 not None,
 	np.ndarray[double, ndim=3, mode="c"] input2 not None, 
@@ -85,6 +89,7 @@ def refine(np.ndarray[double, ndim=2, mode="c"] ref_hyps not None,
 	    np.ndarray[double, ndim=3, mode="c"] objPts not None,
 	    np.ndarray[double, ndim=3, mode="c"] imgPts not None,
 	    np.ndarray[double, ndim=2, mode="c"] hyps not None,
+	    np.ndarray[int, ndim=2, mode="c"] inlier_map not None,
 	    np.ndarray[int, ndim=2, mode="c"] objIdx not None,
 	    np.ndarray[int, ndim=2, mode="c"] shuffleIdx not None,
 	    np.ndarray[double, ndim=2, mode="c"] camMat not None,
@@ -101,6 +106,7 @@ def refine(np.ndarray[double, ndim=2, mode="c"] ref_hyps not None,
 		&objPts[0,0,0],
 		&imgPts[0,0,0],	
 		&hyps[0,0],
+		&inlier_map[0,0],
 		&objIdx[0,0],
 		&shuffleIdx[0,0],
 		&camMat[0,0],
@@ -139,16 +145,19 @@ def refine_single(np.ndarray[double, ndim=1, mode="c"] ref_hyp not None,
 
 
 def dRefine(np.ndarray[double, ndim=3, mode="c"] jacobean_obj not None,
+		np.ndarray[double, ndim=2, mode="c"] jacobean_sample not None,
 		np.ndarray[double, ndim=2, mode="c"] sampling3D not None,
 	    np.ndarray[double, ndim=2, mode="c"] sampling2D not None,
 	    np.ndarray[double, ndim=3, mode="c"] objPts not None,
 	    np.ndarray[double, ndim=3, mode="c"] imgPts not None,
+	    np.ndarray[int, ndim=2, mode="c"] inlier_map not None,
 	    np.ndarray[int, ndim=2, mode="c"] objIdx not None,
 	    np.ndarray[int, ndim=2, mode="c"] shuffleIdx not None,
 	    np.ndarray[double, ndim=2, mode="c"] camMat not None,
 	    np.ndarray[double, ndim=2, mode="c"] grad not None,
 	    int inlier_count,
-	    double eps):
+	    double eps,
+	    int skip):
 	
 	cdef int n, hyp_num, init_num, ref_steps
 	n = sampling3D.shape[0]
@@ -157,10 +166,12 @@ def dRefine(np.ndarray[double, ndim=3, mode="c"] jacobean_obj not None,
 	ref_steps = shuffleIdx.shape[0]
 
 	c_dRefine(&jacobean_obj[0,0,0],
+		&jacobean_sample[0,0],
 		&sampling3D[0,0],
 		&sampling2D[0,0],
 		&objPts[0,0,0],
 		&imgPts[0,0,0],	
+		&inlier_map[0,0],
 		&objIdx[0,0],
 		&shuffleIdx[0,0],
 		&camMat[0,0],
@@ -170,4 +181,5 @@ def dRefine(np.ndarray[double, ndim=3, mode="c"] jacobean_obj not None,
 		init_num,
 		ref_steps,
 		inlier_count,
-		eps)
+		eps,
+		skip)
